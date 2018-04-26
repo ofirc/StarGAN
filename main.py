@@ -21,6 +21,12 @@ def main(config):
         os.makedirs(config.sample_path)
     if not os.path.exists(config.result_path):
         os.makedirs(config.result_path)
+   
+    # print config
+    if config.mode == 'train':
+        run_log_path = os.path.join(config.log_path, "run_params.log")
+        with open(run_log_path, "a") as run_log:
+            run_log.write(str(config))
 
     # Data loader
     celebA_loader = None

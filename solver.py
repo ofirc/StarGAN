@@ -196,6 +196,8 @@ class Solver(object):
 
     def train(self):
         """Train StarGAN within a single dataset."""
+        out_log_path = os.path.join(self.log_path, "out_log.log")
+        out_log = open(out_log_path, "a")
 
         # Set dataloader
         if self.dataset == 'CelebA':
@@ -264,11 +266,17 @@ class Solver(object):
 
                 # Compute loss with real images
                 out_src, out_cls = self.D(real_x)
+                if out_cls.dim() == 1:
+                    out_cls = out_cls.unsqueeze(0) # self.D doesn't return the minibatch dimension when we have only one sample
                 d_loss_real = - torch.mean(out_src)
 
                 if self.dataset == 'CelebA':
-                    d_loss_cls = F.binary_cross_entropy_with_logits(
-                        out_cls, real_label, size_average=False) / real_x.size(0)
+                    try:
+                        d_loss_cls = F.binary_cross_entropy_with_logits(
+                            out_cls, real_label, size_average=False) / real_x.size(0)
+                    except Exception as e:
+                        import pdb
+                        pdb.set_trace()
                 else:
                     d_loss_cls = F.cross_entropy(out_cls, real_label)
 
@@ -278,14 +286,19 @@ class Solver(object):
                     log = ["{:.2f}".format(acc) for acc in accuracies.data.cpu().numpy()]
                     if self.dataset == 'CelebA':
                         print('Classification Acc (Black/Blond/Brown/Gender/Aged): ', end='')
+                        out_log.write('Classification Acc (Black/Blond/Brown/Gender/Aged): ')
                     else:
                         print('Classification Acc (8 emotional expressions): ', end='')
                     print(log)
+                    out_log.write(str(log))
+                    out_log.write("\n")
 
                 # Compute loss with fake images
                 fake_x = self.G(real_x, fake_c)
                 fake_x = Variable(fake_x.data)
                 out_src, out_cls = self.D(fake_x)
+                if out_cls.dim() == 1:
+                    out_cls = out_cls.unsqueeze(0) # self.D doesn't return the minibatch dimension when we have only one sample
                 d_loss_fake = torch.mean(out_src)
 
                 # Backward + Optimize
@@ -298,6 +311,8 @@ class Solver(object):
                 alpha = torch.rand(real_x.size(0), 1, 1, 1).cuda().expand_as(real_x)
                 interpolated = Variable(alpha * real_x.data + (1 - alpha) * fake_x.data, requires_grad=True)
                 out, out_cls = self.D(interpolated)
+                if out_cls.dim() == 1:
+                    out_cls = out_cls.unsqueeze(0) # self.D doesn't return the minibatch dimension when we have only one sample
 
                 grad = torch.autograd.grad(outputs=out,
                                            inputs=interpolated,
@@ -332,6 +347,8 @@ class Solver(object):
 
                     # Compute losses
                     out_src, out_cls = self.D(fake_x)
+                    if out_cls.dim() == 1:
+                        out_cls = out_cls.unsqueeze(0) # self.D doesn't return the minibatch dimension when we have only one sample
                     g_loss_fake = - torch.mean(out_src)
                     g_loss_rec = torch.mean(torch.abs(real_x - rec_x))
 
@@ -363,6 +380,9 @@ class Solver(object):
                     for tag, value in loss.items():
                         log += ", {}: {:.4f}".format(tag, value)
                     print(log)
+                    out_log.write(str(log))
+                    out_log.write("\n")
+                    out_log.flush()
 
                     if self.use_tensorboard:
                         for tag, value in loss.items():
