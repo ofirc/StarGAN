@@ -194,6 +194,83 @@ class Solver(object):
                 fixed_c_list.append(self.to_var(fixed_c, volatile=True))
         return fixed_c_list
 
+    #######################################################
+    # ------ Distance loss related functions Begin ------ #
+    #######################################################
+
+    def distance(self, A, B):
+        return torch.mean(torch.abs(A - B))
+
+    def get_std(self, num_items, vars, expectation):
+
+        num_pairs = 0
+        std_sum = 0.0
+
+        # Compute std for all pairs of images
+        for i in range(num_items - 1):
+            for j in range(i + 1, num_items):
+                num_pairs += 1
+                std_sum += np.square(self.as_np(self.distance(vars[i], vars[j])) - expectation)
+
+        return np.sqrt(std_sum / num_pairs)
+
+    def get_expectation(self, num_items, vars):
+
+        num_pairs = 0
+        distance_sum = 0.0
+
+        # Compute expectation for all pairs of images
+        for i in range(num_items - 1):
+            for j in range(i + 1, num_items):
+                num_pairs += 1
+                distance_sum += self.as_np(self.distance(vars[i], vars[j]))
+
+        return distance_sum / num_pairs
+
+    def as_np(self, data):
+        return data.cpu().data.numpy()
+
+    def get_individual_distance_loss(self, A_i, A_j, AB_i, AB_j):
+        # AB is G(A)
+        distance_in_A = self.distance(A_i, A_j)
+        distance_in_AB = self.distance(AB_i, AB_j)
+
+        self.normalize_distances = True
+        if self.normalize_distances:
+            distance_in_A = (distance_in_A - self.expectation_A) / self.std_A
+            distance_in_AB = (distance_in_AB - self.expectation_B) / self.std_B
+
+        return torch.abs(distance_in_A - distance_in_AB)
+
+    def get_distance_losses(self, real_A, fake_B):
+
+        As = torch.split(real_A, 1)
+#        Bs = torch.split(self.real_B, 1)
+        ABs = torch.split(fake_B, 1)
+#        BAs = torch.split(self.fake_A, 1)
+
+        loss_distance_A = 0.0
+#        loss_distance_B = 0.0
+        num_pairs = 0
+#        min_length = min(len(As), len(Bs))
+        min_length = len(As)
+
+        for i in range(min_length - 1):
+            for j in range(i + 1, min_length):
+                num_pairs += 1
+                loss_distance_A_ij = \
+                    self.get_individual_distance_loss(As[i], As[j],
+                                                      ABs[i], ABs[j])
+
+                loss_distance_A += loss_distance_A_ij
+
+        loss_distance_A = loss_distance_A / num_pairs
+
+        return loss_distance_A
+    #######################################################
+    # ------- Distance loss related functions End ------- #
+    #######################################################
+
     def train(self):
         """Train StarGAN within a single dataset."""
         out_log_path = os.path.join(self.log_path, "out_log.log")
@@ -210,9 +287,9 @@ class Solver(object):
 
         fixed_x = []
         real_c = []
-        for i, (images, labels) in enumerate(self.data_loader):
-            fixed_x.append(images)
-            real_c.append(labels)
+        for i, (attr, images, labels) in enumerate(self.data_loader):
+            fixed_x.append(images.squeeze(0))
+            real_c.append(labels.squeeze(0))
             if i == 3:
                 break
 
@@ -242,7 +319,10 @@ class Solver(object):
         # Start training
         start_time = time.time()
         for e in range(start, self.num_epochs):
-            for i, (real_x, real_label) in enumerate(self.data_loader):
+            for i, (real_attr, real_x, real_label) in enumerate(self.data_loader):
+                real_attr = real_attr[0]
+                real_x = real_x.squeeze(0)
+                real_label = real_label.squeeze(0)
                 
                 # Generat fake labels randomly (target domain labels)
                 rand_idx = torch.randperm(real_label.size(0))
@@ -358,8 +438,37 @@ class Solver(object):
                     else:
                         g_loss_cls = F.cross_entropy(out_cls, fake_label)
 
+                    #####################################
+                    # ------ Distance loss Begin ------ #
+                    #####################################
+                    # Create fake labels
+                    selected_att = int(real_attr/2)
+                    fake_c_dist = real_c.clone()
+                    if real_attr % 2 == 1:
+                        attr_value_for_flip = real_attr % 2
+                    else: # real_attr % 2 == 0
+                        attr_value_for_flip = - 1
+                    for j in range(fake_c_dist.size(0)):
+                        fake_c_dist[j][selected_att].data += attr_value_for_flip
+
+                    # Generate fake images
+                    fake_x_dist = self.G(real_x, fake_c_dist)
+
+                    # Calculate means and standard deviations
+                    self.expectation_A = self.get_expectation(real_x.size(0), real_x)[0].astype(float)
+                    self.expectation_B = self.get_expectation(fake_x_dist.size(0), fake_x_dist)[0].astype(float)
+                    self.std_A = self.get_std(real_x.size(0), real_x, self.expectation_A)[0].astype(float)
+                    self.std_B = self.get_std(fake_x_dist.size(0), fake_x_dist, self.expectation_B)[0].astype(float)
+                    
+                    # Calculate loss
+                    g_loss_dist = self.get_distance_losses(real_x, fake_x_dist)
+
+                    #####################################
+                    # ------- Distance loss End ------- #
+                    #####################################
+
                     # Backward + Optimize
-                    g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                    g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls + g_loss_dist
                     self.reset_grad()
                     g_loss.backward()
                     self.g_optimizer.step()
@@ -368,6 +477,7 @@ class Solver(object):
                     loss['G/loss_fake'] = g_loss_fake.data[0]
                     loss['G/loss_rec'] = g_loss_rec.data[0]
                     loss['G/loss_cls'] = g_loss_cls.data[0]
+                    loss['G/loss_dist'] = g_loss_dist.data[0]
 
                 # Print out log info
                 if (i+1) % self.log_step == 0:
