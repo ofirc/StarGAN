@@ -16,6 +16,8 @@ class CelebDataset(Dataset):
         self.transform = transform
         self.mode = mode
         self.lines = open(metadata_path, 'r').readlines()
+        # remove the comment below to make buckets preprocessing way faster.
+        #self.lines = self.lines[:6000]
         self.num_data = int(self.lines[0])
         self.attr2idx = {}
         self.idx2attr = {}
@@ -26,6 +28,7 @@ class CelebDataset(Dataset):
         random.seed(self.seed)
         self.preprocess()
         print ('Finished preprocessing dataset..!')
+        self.celebA_train_preprocess()
 
         if self.mode == 'train':
             self.num_data = len(self.train_filenames)
@@ -91,22 +94,34 @@ class CelebDataset(Dataset):
                    'male':6, 'female':7,
                    'young':8, 'old':9}
 
+        # attr_baskets maps from feature/attribute into a list of tuples.
+        # each tuple contains: (filename, [attributes])
+        # e.g. 'not_black_hair': [('001766.jpg', [0, 0, 0, 1, 1])]
         attr_baskets = {'black_hair':[], 'not_black_hair':[], 
                         'blond_hair':[], 'not_blond_hair':[], 
                         'brown_hair':[], 'not_brown_hair':[],
                         'male':[], 'female':[],
                         'young':[], 'old':[]}
+
+        # Step 0: dump only selected features in self.preprocess()
+        #         self.selected_attrs = ['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Male', 'Young']
+        #         so for each sample we know only these features.
+
+        # Step 1: divide sample into groups sorted by the feature or absence thereof
+        #         e.g. attr_baskets['black_hair'] - contains all training samples w/ black hair
+        #              attr_baskets['not_black_hair'] - contains all training samples w/o black hair
         for filename, labels in zip(self.train_filenames, self.train_labels):
             for idx, label in enumerate(labels):
                 # if labels[2] == 1 then flip_label == 0. So, we'll add the item to attr_baskets['brown_hair']
                 flip_label = 1 - label
                 attr_baskets[idx2str[2*idx + flip_label]].append((filename, labels))
-           
+
         for basket_values in attr_baskets.values():
             self.seed += 30
             random.seed(self.seed)
             random.shuffle(basket_values)
 
+        # like attr_baskets but now contains a list of 16-sized lists.
         minibatch_baskets = {'black_hair':[], 'not_black_hair':[], 
                              'blond_hair':[], 'not_blond_hair':[], 
                              'brown_hair':[], 'not_brown_hair':[],
@@ -114,9 +129,16 @@ class CelebDataset(Dataset):
                              'young':[], 'old':[]}
         
         keep_working = True
+        from datetime import datetime
+        start = datetime.now()
+        iter=0
 
+        # Step 2: split the attr baskets into minibatches
         while keep_working:
             '''In each loop we try to put a minibatch in every basket'''
+            cur = datetime.now()
+            print('keep_working1: iter=%d, elapsed=%s, time=%s' % (iter, cur - start, time.ctime()))
+            iter += 1
             keep_working = False
             for b_key in attr_baskets:
                 # Take a mini batch
@@ -137,7 +159,18 @@ class CelebDataset(Dataset):
                             pass
 
         keep_working = True
+        iter=0
+        prev = 0
+        start = datetime.now()
+        # Step 3: generate pairs of [real_attr, values]
+        #         [0, ('001888.jpg', [1, 0, 0, 1, 1]), ('005426.jpg', [1, 0, 0, 0, 0]), 
+        #         ... ('002899.jpg', [1, 0, 0, 0, 1])]
+        # the real_attr is the index into the dictionary above.
+        # it is needed so that we know what attribute to flip.
         while keep_working:
+            cur = datetime.now()
+            print('keep_working2: iter=%d, elapsed=%s, time=%s' % (iter, cur - start, time.ctime()))
+            iter += 1
             keep_working = False
             for key in minibatch_baskets:
                 if len(minibatch_baskets[key]) > 0:
@@ -173,7 +206,7 @@ class CelebDataset(Dataset):
         return self.transform(image), torch.FloatTensor(label)
 
     def __len__(self):
-        self.celebA_train_preprocess()
+        #self.celebA_train_preprocess()
         if self.mode == 'train':
             return len(self.train_mb)
         elif self.mode in ['test']:
